@@ -38,6 +38,10 @@ export function getReachableHexes(state, unit, board) {
             if (occupant) continue;
 
             const terrain = board.getTerrain(next.q, next.r);
+
+            // Rule: Artillery can only move onto PLAIN or TRENCH
+            if (unit.type === 'ARTILLERY' && (terrain.name !== 'Plain' && terrain.name !== 'Trench')) continue;
+
             const moveCost = TERRAIN_COST[terrain.name] || 1;
 
             const newCost = current.cost + moveCost;
@@ -56,6 +60,7 @@ export function getReachableHexes(state, unit, board) {
 
 export function canMove(state, unit, toHex) {
     if (unit.actedThisTurn) return false;
+    if (unit.movedThisTurn) return false; // Can only move once per turn
     if (getUnitAt(state, toHex.q, toHex.r)) return false;
     return true;
 }
@@ -65,7 +70,13 @@ export function applyMove(state, unitId, toHex) {
     if (unit) {
         unit.q = toHex.q;
         unit.r = toHex.r;
-        unit.actedThisTurn = true;
+        unit.movedThisTurn = true;
+
+        // Infantry and MG can Move AND Attack. Others end turn after move.
+        const canAttackAfterMove = ['INFANTRY', 'MG'].includes(unit.type);
+        if (!canAttackAfterMove) {
+            unit.actedThisTurn = true;
+        }
     }
     checkWinCondition(state);
 }
@@ -101,7 +112,7 @@ export function applyAttack(state, attackerId, targetId) {
     const damage = Math.max(0, atkStats.attack - defStats.defense) + bonus;
 
     target.hp -= damage;
-    attacker.actedThisTurn = true;
+    attacker.actedThisTurn = true; // Attacking always ends the unit's turn
 
     console.log(`Attack: ${attacker.type} -> ${target.type} (DMG: ${damage}, HP left: ${target.hp})`);
 
@@ -119,6 +130,7 @@ export function endTurn(state) {
     state.units.forEach(u => {
         if (u.side === state.activeSide) {
             u.actedThisTurn = false;
+            u.movedThisTurn = false;
         }
     });
 
@@ -139,18 +151,42 @@ export function checkAutoEndTurn(state) {
     return false;
 }
 
-export function canBuildTrench(state, unit, board) {
-    if (unit.type !== 'ENGINEER') return false;
-    if (unit.actedThisTurn) return false;
-    const terrain = board.getTerrain(unit.q, unit.r);
-    // Not on Hill or existing Trench
-    if (terrain.name === 'Hill' || terrain.name === 'Trench') return false;
-    return true;
+export function getTrenchTargets(state, unit, board) {
+    if (unit.type !== 'ENGINEER') return [];
+    if (unit.actedThisTurn) return [];
+
+    const targets = [];
+    // Current hex? User said Range 1. Usually implies adjacent. 
+    // Let's include current hex + neighbors?
+    // "Range 1" usually means distance 1.
+    // Let's allow neighbors.
+
+    const neighbors = getNeighbors(unit.q, unit.r);
+    // Add current hex too?
+    neighbors.push({ q: unit.q, r: unit.r });
+
+    for (const hex of neighbors) {
+        if (!inBounds(hex.q, hex.r, board.width, board.height)) continue;
+
+        const terrain = board.getTerrain(hex.q, hex.r);
+        // Can only build on Plain
+        if (terrain.name !== 'Plain') continue;
+
+        // Cannot build if occupied by another unit? 
+        // Or can build under self (current hex)?
+        // Can build under ally? 
+        // Let's allow building on empty hex or self.
+        const occupant = getUnitAt(state, hex.q, hex.r);
+        if (occupant && occupant.id !== unit.id) continue;
+
+        targets.push(hex);
+    }
+    return targets;
 }
 
-export function buildTrench(state, unit, board) {
-    if (!canBuildTrench(state, unit, board)) return;
-    board.setTerrain(unit.q, unit.r, 'Trench');
+export function buildTrench(state, unit, targetHex, board) {
+    // Validate again
+    board.setTerrain(targetHex.q, targetHex.r, 'Trench');
     unit.actedThisTurn = true;
     checkWinCondition(state);
 }
@@ -162,6 +198,22 @@ export function getUnitAt(state, q, r) {
 export function checkWinCondition(state) {
     if (state.gameOver) return;
 
+    // Check Elimination (No units left)
+    const blueCount = state.units.filter(u => u.side === SIDE.BLUE).length;
+    const redCount = state.units.filter(u => u.side === SIDE.RED).length;
+
+    if (blueCount === 0) {
+        state.gameOver = true;
+        state.winner = SIDE.RED;
+        return;
+    }
+    if (redCount === 0) {
+        state.gameOver = true;
+        state.winner = SIDE.BLUE;
+        return;
+    }
+
+    // Check Score
     if (state.score[SIDE.BLUE] >= 10) {
         state.gameOver = true;
         state.winner = SIDE.BLUE;
@@ -173,9 +225,11 @@ export function checkWinCondition(state) {
         return;
     }
 
+    // Check HQ Occupation
     const blueHQ = HQ_POSITIONS.BLUE;
     const redHQ = HQ_POSITIONS.RED;
 
+    // Is there a RED unit on BLUE HQ?
     const unitOnBlueHQ = getUnitAt(state, blueHQ.q, blueHQ.r);
     if (unitOnBlueHQ && unitOnBlueHQ.side === SIDE.RED) {
         state.gameOver = true;
@@ -183,6 +237,7 @@ export function checkWinCondition(state) {
         return;
     }
 
+    // Is there a BLUE unit on RED HQ?
     const unitOnRedHQ = getUnitAt(state, redHQ.q, redHQ.r);
     if (unitOnRedHQ && unitOnRedHQ.side === SIDE.BLUE) {
         state.gameOver = true;

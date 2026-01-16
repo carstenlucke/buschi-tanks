@@ -1,5 +1,5 @@
 import { hexToPixel, pixelToHex, HEX_SIZE, inBounds } from './hex.js';
-import { getReachableHexes, applyMove, getUnitAt, getAttackableTargets, applyAttack, endTurn, checkAutoEndTurn, canBuildTrench, buildTrench } from './rules.js';
+import { getReachableHexes, applyMove, getUnitAt, getAttackableTargets, applyAttack, endTurn, checkAutoEndTurn, getTrenchTargets, buildTrench } from './rules.js';
 import { SIDE, createInitialState, UNIT_TYPES } from './state.js';
 
 const TERRAIN = {
@@ -10,11 +10,12 @@ const TERRAIN = {
 };
 
 export class Board {
-    constructor(scene, state) {
+    constructor(scene, state, gameMode = 'AI') {
         this.scene = scene;
         this.state = state;
-        this.width = 9;
-        this.height = 11;
+        this.gameMode = gameMode; // AI or PVP
+        this.width = 18; // Doubled from 9
+        this.height = 22; // Doubled from 11
         this.hexGraphics = null;
         this.selectionGraphics = null;
         this.unitGroup = null;
@@ -43,82 +44,155 @@ export class Board {
         this.generateMap(this.state.rngSeed);
         this.drawGrid();
         this.createLegend();
-        this.createUI();
+        this.createUI(); // Initial creation
         this.drawUnits();
+
+        // Setup Camera
+        const cam = this.scene.cameras.main;
+        const gridWidthPx = this.width * HEX_SIZE * 1.5 + 100;
+        const gridHeightPx = this.height * HEX_SIZE * Math.sqrt(3) + 100;
+
+        cam.setBounds(0, 0, Math.max(this.scene.scale.width, gridWidthPx), Math.max(this.scene.scale.height, gridHeightPx));
+
+        // Handle Window Resize
+        this.scene.scale.on('resize', (gameSize) => {
+            const width = gameSize.width;
+            const height = gameSize.height;
+            cam.setBounds(0, 0, Math.max(width, gridWidthPx), Math.max(height, gridHeightPx));
+            this.updateUIPositions(width, height);
+        });
+
+        // Keyboard input
+        this.scene.input.keyboard.on('keydown-T', () => {
+            this.handleAction();
+        });
+
+        // Draggable camera
+        this.scene.input.on('pointermove', (p) => {
+            if (!p.isDown) return;
+            cam.scrollX -= (p.x - p.prevPosition.x) / cam.zoom;
+            cam.scrollY -= (p.y - p.prevPosition.y) / cam.zoom;
+        });
 
         this.scene.input.on('pointerdown', (pointer) => {
             if (this.state.gameOver) return;
-            if (this.state.activeSide === SIDE.RED) return;
+
+            // Allow input if:
+            // 1. Blue Turn (always allowed if not AI active)
+            // 2. Red Turn AND PvP Mode
+            const isRedTurn = this.state.activeSide === SIDE.RED;
+            if (isRedTurn && this.gameMode === 'AI') return; // Block input during AI turn
+
             this.handlePointerDown(pointer);
         });
     }
 
     createUI() {
-        this.turnText = this.scene.add.text(this.scene.scale.width / 2, 20, '', {
+        // UI should be fixed to camera!
+        this.turnText = this.scene.add.text(0, 0, '', {
             fontSize: '20px',
             fill: '#ffffff'
-        }).setOrigin(0.5);
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(100);
         this.updateTurnText();
 
-        const btnX = this.scene.scale.width - 60;
-        const btnY = this.scene.scale.height - 40;
+        this.btnContainer = this.scene.add.container(0, 0).setScrollFactor(0).setDepth(100);
 
-        const btnBg = this.scene.add.rectangle(btnX, btnY, 100, 40, 0x444444)
+        const btnBg = this.scene.add.rectangle(0, 0, 100, 40, 0x444444)
             .setInteractive({ useHandCursor: true })
             .on('pointerdown', () => this.handleEndTurn());
 
-        const btnText = this.scene.add.text(btnX, btnY, 'End Turn', {
+        const btnText = this.scene.add.text(0, 0, 'WEITER', {
             fontSize: '16px', fill: '#ffffff'
         }).setOrigin(0.5);
 
-        this.coordText = this.scene.add.text(10, this.scene.scale.height - 30, 'Selected: (-,-)', {
+        this.btnContainer.add([btnBg, btnText]);
+
+        this.coordText = this.scene.add.text(10, 0, 'Selected: (-,-)', {
             fontSize: '16px',
             fill: '#ffffff'
-        });
+        }).setScrollFactor(0).setDepth(100);
 
         // Action Button (Build Trench) - Initially hidden
-        this.actionBtn = this.scene.add.container(this.scene.scale.width - 200, this.scene.scale.height - 40);
+        this.actionBtn = this.scene.add.container(0, 0);
         const actBg = this.scene.add.rectangle(0, 0, 120, 40, 0x008800)
             .setInteractive({ useHandCursor: true })
             .on('pointerdown', () => this.handleAction());
         const actText = this.scene.add.text(0, 0, 'Build Trench', { fontSize: '14px', fill: '#fff' }).setOrigin(0.5);
         this.actionBtn.add([actBg, actText]);
         this.actionBtn.setVisible(false);
+        this.actionBtn.setScrollFactor(0).setDepth(100);
 
         this.textGroup.add(this.turnText);
-        this.textGroup.add(btnBg);
-        this.textGroup.add(btnText);
-        this.textGroup.add(this.coordText);
-        // this.textGroup.add(this.actionBtn); // Container needs to be added to scene, which it is. TextGroup is mainly for organization if needed.
+
+        // Position everything initially
+        this.updateUIPositions(this.scene.scale.width, this.scene.scale.height);
+    }
+
+    updateUIPositions(width, height) {
+        // Turn Text: Top Center
+        this.turnText.setPosition(width / 2, 30);
+
+        // WEITER Button: Top Right (SAFE AREA)
+        // Moved from bottom-right (where mobile bars are) to top-right
+        this.btnContainer.setPosition(width - 70, 40);
+
+        // Info Text: Bottom Left
+        this.coordText.setPosition(10, height - 30);
+
+        // Action Button: Bottom Right (Moved up to be safe)
+        // Originally at width-200, height-40.
+        // Let's ensure it's above the bottom bar area.
+        this.actionBtn.setPosition(width - 80, height - 100);
     }
 
     updateTurnText() {
         if (this.state.gameOver) {
-            this.turnText.setText(`GAME OVER! Winner: ${this.state.winner}`);
+            const winnerName = this.state.playerNames[this.state.winner];
+            this.turnText.setText(`GAME OVER! Winner: ${winnerName}`);
             this.turnText.setColor('#ffff00');
         } else {
-            this.turnText.setText(`Turn ${this.state.turnNumber} - ${this.state.activeSide} (Score: B:${this.state.score.BLUE} R:${this.state.score.RED})`);
+            const activeName = this.state.playerNames[this.state.activeSide];
+            const nameBlue = this.state.playerNames[SIDE.BLUE];
+            const nameRed = this.state.playerNames[SIDE.RED];
+            this.turnText.setText(`Turn ${this.state.turnNumber} - ${activeName} (Score: ${nameBlue}:${this.state.score.BLUE} ${nameRed}:${this.state.score.RED})`);
             this.turnText.setColor(this.state.activeSide === SIDE.BLUE ? '#4444ff' : '#ff4444');
         }
     }
 
     handleEndTurn() {
-        if (!this.state.gameOver && this.state.activeSide === SIDE.BLUE) {
-            endTurn(this.state);
-            this.onTurnChange();
-        }
+        if (this.state.gameOver) return;
+
+        // Singleplayer: Only Blue can end turn manually (Red is AI)
+        // Multiplayer: Both can end turn
+        const isRedTurn = this.state.activeSide === SIDE.RED;
+
+        if (this.gameMode === 'AI' && isRedTurn) return; // Wait for AI
+
+        endTurn(this.state);
+        this.onTurnChange();
     }
 
     handleAction() {
-        if (this.selectedUnitId) {
-            const unit = this.state.units.find(u => u.id === this.selectedUnitId);
-            if (unit) {
-                if (canBuildTrench(this.state, unit, this)) {
-                    buildTrench(this.state, unit, this);
-                    // Force refresh grid and units
-                    this.drawGrid();
-                    this.afterAction();
-                }
+        // Engineer Action: Build Trench
+        if (!this.selectedUnitId) return;
+        const unit = this.state.units.find(u => u.id === this.selectedUnitId);
+        if (!unit || unit.type !== 'ENGINEER') return;
+
+        // Toggle Build Mode
+        if (this.buildMode) {
+            this.buildMode = false;
+            this.buildTargets = [];
+            this.drawHighlights();
+            this.coordText.setText(`Order Canceled.`);
+        } else {
+            const targets = getTrenchTargets(this.state, unit, this);
+            if (targets.length > 0) {
+                this.buildMode = true;
+                this.buildTargets = targets;
+                this.drawHighlights();
+                this.coordText.setText(`Select target for Trench.`);
+            } else {
+                this.coordText.setText(`No valid targets for Trench.`);
             }
         }
     }
@@ -133,7 +207,9 @@ export class Board {
             return;
         }
 
-        if (this.state.activeSide === SIDE.RED) {
+        // Only run AI if Singleplayer AND Red Turn
+        if (this.gameMode === 'AI' && this.state.activeSide === SIDE.RED) {
+            console.log("Starting AI turn...");
             import('./ai.js').then(module => {
                 module.executeRedTurn(this.state, this, () => {
                     this.drawUnits();
@@ -153,7 +229,13 @@ export class Board {
                 if (rand < 0.2) type = TERRAIN.FOREST;
                 else if (rand < 0.35) type = TERRAIN.HILL;
                 else if (rand < 0.40) type = TERRAIN.TRENCH;
-                this.mapData.set(`${q},${r}`, type);
+
+                // Store using Axial Coordinates as key
+                // Convert Odd-Q Offset to Axial
+                const axialQ = q;
+                const axialR = r - (q - (q & 1)) / 2;
+
+                this.mapData.set(`${axialQ},${axialR}`, type);
             }
         }
     }
@@ -184,14 +266,18 @@ export class Board {
         for (let q = 0; q < this.width; q++) {
             for (let r = 0; r < this.height; r++) {
                 if (!inBounds(q, r, this.width, this.height)) continue;
-                const terrain = this.getTerrain(q, r);
-                this.hexGraphics.lineStyle(2, 0xaaaaaa, 1.0);
-                this.hexGraphics.fillStyle(terrain.color, 1.0);
 
                 const frameCol = q;
                 const frameRow = r;
                 const axialQ = frameCol;
                 const axialR = frameRow - (frameCol - (frameCol & 1)) / 2;
+
+                // Use Axial for lookup
+                const terrain = this.getTerrain(axialQ, axialR);
+
+                this.hexGraphics.lineStyle(2, 0xaaaaaa, 1.0);
+                this.hexGraphics.fillStyle(terrain.color, 1.0);
+
                 const pos = hexToPixel(axialQ, axialR);
                 this.drawHex(this.hexGraphics, pos.x + this.boardOffset.x, pos.y + this.boardOffset.y, true);
             }
@@ -251,10 +337,25 @@ export class Board {
         const x = pointer.x - this.boardOffset.x;
         const y = pointer.y - this.boardOffset.y;
         const hex = pixelToHex(x, y);
+        console.log(`Click at (${x},${y}) -> Hex (${hex.q}, ${hex.r})`);
 
         if (!inBounds(hex.q, hex.r, this.width, this.height)) {
+            console.log("Out of bounds!");
             this.deselect();
             return;
+        }
+
+        // Handle build mode selection
+        if (this.buildMode && this.selectedUnitId) {
+            const targetHex = this.buildTargets.find(h => h.q === hex.q && h.r === hex.r);
+            if (targetHex) {
+                const unit = this.state.units.find(u => u.id === this.selectedUnitId);
+                if (unit) {
+                    buildTrench(this.state, unit, targetHex);
+                    this.afterAction();
+                }
+                return;
+            }
         }
 
         const isReachable = this.reachableHexes.some(h => h.q === hex.q && h.r === hex.r);
@@ -272,6 +373,7 @@ export class Board {
         }
 
         const clickedUnit = getUnitAt(this.state, hex.q, hex.r);
+        console.log("Clicked Unit:", clickedUnit);
 
         if (clickedUnit) {
             if (clickedUnit.side === this.state.activeSide) {
@@ -302,6 +404,10 @@ export class Board {
     }
 
     selectUnit(unit) {
+        // Reset build mode when selecting a new unit
+        this.buildMode = false;
+        this.buildTargets = [];
+
         if (unit.actedThisTurn) {
             this.coordText.setText(`Unit: ${unit.type} (Moved)`);
             this.selectHex(unit);
@@ -323,7 +429,7 @@ export class Board {
         this.coordText.setText(`${unit.type} (${unit.hp}HP) - Move:${stats.move} Rng:${stats.range} Atk:${stats.attack} Def:${stats.defense}`);
 
         // Engineer special
-        if (canBuildTrench(this.state, unit, this)) {
+        if (unit.type === 'ENGINEER' && getTrenchTargets(this.state, unit, this).length > 0) {
             this.actionBtn.setVisible(true);
         } else {
             this.actionBtn.setVisible(false);
@@ -343,6 +449,8 @@ export class Board {
         this.selectedHex = null;
         this.reachableHexes = [];
         this.attackableTargets = [];
+        this.buildMode = false; // Reset build mode
+        this.buildTargets = []; // Clear build targets
         this.selectionGraphics.clear();
         this.coordText.setText('Selected: (-,-)');
         if (this.actionBtn) this.actionBtn.setVisible(false);
@@ -356,20 +464,33 @@ export class Board {
     }
 
     drawHighlights() {
+        this.selectionGraphics.clear(); // Clear all previous highlights
         this.selectionGraphics.lineStyle(0);
-        this.selectionGraphics.fillStyle(0x00ffff, 0.3);
 
+        // Move Highlights (Cyan)
+        this.selectionGraphics.fillStyle(0x00ffff, 0.3);
         this.reachableHexes.forEach(h => {
             const pos = hexToPixel(h.q, h.r);
             this.drawHex(this.selectionGraphics, pos.x + this.boardOffset.x, pos.y + this.boardOffset.y, true);
         });
 
+        // Attack Highlights (Red)
         this.selectionGraphics.fillStyle(0xff0000, 0.4);
         this.attackableTargets.forEach(h => {
             const pos = hexToPixel(h.q, h.r);
             this.drawHex(this.selectionGraphics, pos.x + this.boardOffset.x, pos.y + this.boardOffset.y, true);
         });
 
+        // Build Highlights (Orange)
+        if (this.buildMode) {
+            this.selectionGraphics.fillStyle(0xFF8800, 0.5); // Orange for differentiation
+            this.buildTargets.forEach(h => {
+                const pos = hexToPixel(h.q, h.r);
+                this.drawHex(this.selectionGraphics, pos.x + this.boardOffset.x, pos.y + this.boardOffset.y, true);
+            });
+        }
+
+        // Selection Outline
         if (this.selectedHex) {
             this.selectionGraphics.lineStyle(4, 0xffff00, 1);
             const pos = hexToPixel(this.selectedHex.q, this.selectedHex.r);

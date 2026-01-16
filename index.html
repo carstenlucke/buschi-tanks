@@ -1,14 +1,32 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Hex Strategy Game</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
-    <script type="module" src="src/main.js"></script>
+    <script type="module" src="src/main.js?v=2"></script>
 </head>
+
 <body>
     <div id="game-container"></div>
+    <div id="menu-overlay" style="display: none;">
+        <div class="menu-content">
+            <h2>Enter Player Names</h2>
+            <div class="input-group">
+                <label for="p1-name" style="color: #4444ff;">Player 1 (Blue):</label>
+                <input type="text" id="p1-name" value="Player 1">
+            </div>
+            <div class="input-group" id="p2-group">
+                <label for="p2-name" style="color: #ff4444;">Player 2 (Red):</label>
+                <input type="text" id="p2-name" value="Player 2">
+            </div>
+            <button id="start-btn">START GAME</button>
+            <button id="cancel-btn">CANCEL</button>
+        </div>
+    </div>
 </body>
+
 </html>
